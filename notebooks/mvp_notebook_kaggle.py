@@ -47,6 +47,9 @@
 # %% [markdown]
 # ## Installing required packages
 
+# %% [markdown]
+# This cell imports and verifies core dependencies (Gemini API, Tenacity, Cartesia) required for the agent's language, retry, and text-to-speech capabilities. It ensures all libraries are available and provides clear instructions if any are missing.
+
 # %% id="Fx_QR3iBF_8h"
 # !pip install "google-generativeai>=0.3.0" "tenacity>=8.2.3" "gradio>=4.0.0" "cartesia>=2.0.0" "python-dotenv>=1.0.0" langchain-google-genai langchain-core
 
@@ -95,6 +98,9 @@ logger = logging.getLogger(__name__)
 # %% [markdown] id="QyccDKQIGxxT"
 # # Bartending Agent Implementation 🤖
 
+# %% [markdown]
+# Importing and verifying core dependencies (Gemini API, Tenacity, Cartesia) required for the agent's language, retry, and text-to-speech capabilities. Ensuring all libraries are available and provide clear instructions if any are missing.
+
 # %% id="genai_version_cell"
 try:
     import google.generativeai as genai
@@ -135,8 +141,13 @@ except ImportError:
     print("Please ensure it's installed with: pip install cartesia")
     sys.exit(1)
 
+# %% [markdown]
+# ## Configuration ⚙️
+
+# %% [markdown]
+# API Key imports. This will be moved up later for the Kaggle submission. 
+
 # %% id="FB4uGl8iHjnm"
-# --- Configuration ---
 
 # Load Gemini API key from .env file
 from dotenv import load_dotenv
@@ -153,32 +164,34 @@ if not CARTESIA_API_KEY:
     # Decide if TTS is optional or required. Assuming required for now.
     raise EnvironmentError("CARTESIA_API_KEY is required but not found.")
 
+# %% [markdown]
+# Initialize Cartesia Client
+
 # %% id="_lebELKHHmUL"
-# Initialize Cartesia Client (ONCE at module load)
 try:
-    # Replace "your-chosen-voice-id" with an actual valid ID from Cartesia
-    CARTESIA_VOICE_ID = "6f84f4b8-58a2-430c-8c79-688dad597532" # Example placeholder ID - CHANGE THIS
+    CARTESIA_VOICE_ID = "6f84f4b8-58a2-430c-8c79-688dad597532"
     if not CARTESIA_VOICE_ID or "your-chosen-voice-id" in CARTESIA_VOICE_ID:
          logger.warning("CARTESIA_VOICE_ID is not set to a valid ID. Please edit bartending_agent.py.")
-         # Decide if this is fatal. Maybe proceed without voice for now?
 
     cartesia_client = Cartesia(
         api_key=CARTESIA_API_KEY,
         )
     logger.info("Successfully initialized Cartesia client.")
-    # Optional: Could add a check here to verify the voice ID exists using the client if possible
 except Exception as e:
      logger.exception("Fatal: Failed to initialize Cartesia client.")
      raise RuntimeError("Cartesia client initialization failed.") from e
 
 
+# %% [markdown]
+# ## Tooling 🛠️
+
+# %% [markdown]
+# This section defines the bartender agent's core logic, including the menu tools, Gemini API call functions, and the system prompt. These components enable the agent to understand the menu, process user orders, interact intelligently, and deliver a realistic bartending experience.
+
 # %% id="Ng_t4TUIHwL7"
 @tool
 def get_menu() -> str:
     """Provide the latest up-to-date menu."""
-    # Note that this is just hard-coded text, but you could connect this to a live stock
-    # database, or you could use Gemini's multi-modal capabilities and take live photos of
-    # your cafe's chalk menu or the products on the counter and assmble them into an input.
 
     return """
     MENU:
@@ -215,29 +228,9 @@ def get_menu() -> str:
   """
 
 # --- Tenacity retry decorator for _call_gemini_api ---
-# ... (keep the @tenacity_retry decorator as it was) ...
-@tenacity_retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=2, max=10),
-    #retry=retry_if_exception_type(RETRYABLE_EXCEPTIONS),
-    before_sleep=before_sleep_log(logger, logging.WARNING) if callable(before_sleep_log) else None, # Check if callable
-    reraise=True # Re-raise the exception if all retries fail
-)
-def _call_gemini_api(prompt_content: List[Dict], config: Dict) -> genai.types.GenerateContentResponse: # Adjusted input type hint
-    """Internal function to call the Gemini API with retry logic (Stateless)."""
-    logger.debug("Calling Gemini API...")
-    # Uses the globally initialized 'model'
-    response = model.generate_content(
-        contents=prompt_content, # Correct parameter name is 'contents'
-        generation_config=config,
-        # safety_settings can be added here if needed
-    )
-    logger.debug("Gemini API call successful.")
-    return response
+# (Function _call_gemini_api removed as it was unused)
 
-
-# --- New LangGraph-style System Prompt ---
-# ... (keep BARTENDERBOT_SYSINT definition as it was) ...
+# --- LangGraph-style System Prompt ---
 BARTENDERBOT_SYSINT = (
     "You are a Bartender-Bot, an interactive drink ordering system. A human will talk to you about the "
     "available products you have and you will answer any questions about menu items and their prices (and only about "
@@ -261,11 +254,7 @@ BARTENDERBOT_SYSINT = (
 )
 
 
-# %% id="jMM9jggIVHVV"
-# --- Tool Definitions ---
-
-# (Keep your existing @tool def get_menu() -> str: ... here)
-
+# %%
 # Helper function to parse the menu string (you might need to adjust regex based on exact format)
 def _parse_menu_items(menu_str: str) -> Dict[str, float]:
     items = {}
@@ -279,181 +268,103 @@ def _parse_menu_items(menu_str: str) -> Dict[str, float]:
         items[item_name.lower()] = price # Store lowercase for easier matching
     return items
 
+
+# %%
 @tool
-def add_to_order(item_name: str, quantity: int = 1) -> str:
+def add_to_order(item_name: str, quantity: int = 1, order_state: list = None) -> str:
     """
     Adds the specified quantity of an item to the customer's order.
     Use this AFTER verifying the item is on the menu.
     Args:
         item_name: The exact name of the item from the menu.
         quantity: The number of this item to add (defaults to 1).
+        order_state: The current session's order state (list of dicts).
     """
-    global current_process_order_state # Use global to access state within this call
-
-    menu_str = get_menu.invoke({}) # Get the current menu # Get the current menu
+    if order_state is None:
+        return "Error: No order state provided."
+    menu_str = get_menu.invoke({}) # Get the current menu
     menu_items = _parse_menu_items(menu_str)
     item_lower = item_name.lower()
-
     if item_lower in menu_items:
         price = menu_items[item_lower]
         for _ in range(quantity):
-            current_process_order_state['order'].append({"name": item_name, "price": price}) # Modify the state directly
+            order_state.append({"name": item_name, "price": price}) # Modify the session state directly
         logger.info(f"Tool: Added {quantity} x '{item_name}' to order.")
         return f"Successfully added {quantity} x {item_name} to the order."
     else:
         logger.warning(f"Tool: Attempted to add item '{item_name}' not found in parsed menu.")
-        # Try a fuzzy match maybe? For now, return error.
-        # Consider listing similar items if needed.
         return f"Error: Item '{item_name}' could not be found on the current menu. Please verify the item name."
 
 @tool
-def clear_order() -> str:
+def clear_order(order_state: list = None) -> str:
     """Removes all items from the current order."""
-    global current_process_order_state
-    current_process_order_state['order'] = [] # Clear the state
+    if order_state is None:
+        return "Error: No order state provided."
+    order_state.clear() # Clear the session state
     logger.info("Tool: Cleared order.")
     return "The order has been cleared."
 
 @tool
-def get_order() -> str:
+def get_order(order_state: list = None) -> str:
     """Returns the current list of items in the order for the agent to see."""
-    global current_process_order_state
-    order_list = current_process_order_state['order']
-    if not order_list:
+    if order_state is None:
+        return "Error: No order state provided."
+    if not order_state:
         return "The order is currently empty."
-    order_details = "\n".join([f"- {item['name']} (${item['price']:.2f})" for item in order_list])
-    total = sum(item['price'] for item in order_list)
+    order_details = "\n".join([f"- {item['name']} (${item['price']:.2f})" for item in order_state])
+    total = sum(item['price'] for item in order_state)
     return f"Current Order:\n{order_details}\nTotal: ${total:.2f}"
 
 @tool
-def confirm_order() -> str:
+def confirm_order(order_state: list = None) -> str:
     """
     Displays the current order to the user and asks for confirmation.
     The user's response will be processed in the next turn.
     """
-    global current_process_order_state
-    order_list = current_process_order_state['order']
-    if not order_list:
+    if order_state is None:
+        return "Error: No order state provided."
+    if not order_state:
         return "There is nothing in the order to confirm. Please add items first."
-
-    order_details = "\n".join([f"- {item['name']} (${item['price']:.2f})" for item in order_list])
-    total = sum(item['price'] for item in order_list)
+    order_details = "\n".join([f"- {item['name']} (${item['price']:.2f})" for item in order_state])
+    total = sum(item['price'] for item in order_state)
     confirmation_request = f"Here is your current order:\n{order_details}\nTotal: ${total:.2f}\n\nIs this correct? You can ask to add/remove items or proceed to place the order."
     logger.info("Tool: Generated order confirmation request for user.")
-    # This tool doesn't actually *place* the order, it just prepares the text for the LLM to relay
-    return confirmation_request # The LLM should incorporate this text into its response to the user
+    return confirmation_request
 
 @tool
-def place_order() -> str:
+def place_order(order_state: list = None) -> str:
     """Finalizes and places the customer's confirmed order."""
-    global current_process_order_state
-    order_list = current_process_order_state['order']
-    if not order_list:
+    if order_state is None:
+        return "Error: No order state provided."
+    if not order_state:
         return "Cannot place an empty order. Please add items first."
-
-    # In a real system, this would interact with a POS or backend API.
-    # Here, we'll just log it and modify the state.
-    order_details = ", ".join([item['name'] for item in order_list])
-    total = sum(item['price'] for item in order_list)
+    order_details = ", ".join([item['name'] for item in order_state])
+    total = sum(item['price'] for item in order_state)
     logger.info(f"Tool: Placing order: [{order_details}], Total: ${total:.2f}")
-
-    # Mark order as finished (though 'finished' isn't explicitly in Gradio state)
-    # We can clear the order after placing it for this simple setup
-    current_process_order_state['order'] = [] # Clear order after placing
-    current_process_order_state['finished'] = True # Set a flag if needed later
-
+    order_state.clear() # Clear order after placing
     return f"Order placed successfully! Your items ({order_details}) totalling ${total:.2f} will be ready shortly."
 
 # List of all tools for the LLM
+# (They now expect the session order state to be passed explicitly)
 tools = [get_menu, add_to_order, clear_order, get_order, confirm_order, place_order]
 
-# %% id="P-mA2edJXlkb"
-# Model initialization
-
-# With the LangChain setup:
-try:
-    # Ensure GEMINI_API_KEY is set (e.g., from .env file or input)
-    if not GEMINI_API_KEY:
-        raise ValueError("GEMINI_API_KEY not found.")
-
-    # Use ChatGoogleGenerativeAI and bind the tools
-    # Note: Use a model that supports tool calling well, like gemini-pro or newer flash/pro models
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-2.0-flash", # Or "gemini-pro", etc. Check model compatibility
-        temperature=0.7,
-        max_output_tokens=2048,
-        google_api_key=GEMINI_API_KEY
-    ).bind_tools(tools) # Bind the list of tool functions
-
-    logger.info(f"Successfully initialized LangChain ChatGoogleGenerativeAI model bound with tools.")
-
-except Exception as e:
-    logger.exception(f"Fatal: Failed to initialize LangChain Gemini model: {str(e)}")
-    raise RuntimeError(
-        f"Failed to initialize LangChain Gemini model. Check API key and model name."
-    ) from e
-
-# %% id="_BOntx4XH5-J"
-# --- New LangGraph-style System Prompt ---
-# (Note: The actual tools mentioned here like add_to_order are not yet implemented
-# in this specific file structure. The LLM will receive these instructions, but
-# the surrounding code doesn't execute LangGraph tools.)
-BARTENDERBOT_SYSINT = (
-    "You are a Bartender-Bot, an interactive drink ordering system. A human will talk to you about the "
-    "available products you have and you will answer any questions about menu items and their prices (and only about "
-    "menu items - no off-topic discussion, but you can chat about the products and their history). "
-    "The customer will place an order for 1 or more items from the menu, which you will structure "
-    "and send to the ordering system after confirming the order with the human. "
-    "\n\n"
-    "Add items to the customer's order with add_to_order, and reset the order with clear_order. "
-    "To see the contents of the order so far, call get_order (this is shown to you, not the user) "
-    "Always confirm_order with the user (double-check) before calling place_order. Calling confirm_order will "
-    "display the order items to the user and returns their response to seeing the list. Their response may contain modifications. "
-    "Always verify and respond with drink and modifier names from the MENU before adding them to the order. "
-    "If you are unsure a drink or modifier matches those on the MENU, ask a question to clarify or redirect. "
-    "You only have the modifiers listed on the menu. "
-    "Once the customer has finished ordering items, Call confirm_order to ensure it is correct then make "
-    "any necessary updates and then call place_order. Once place_order has returned, thank the user for their business and "
-    "politely say their order will be ready shortly!"
-    "\n\n"
-    "The bar's name is MOK 5-ha, pronounced as 'Moksha'. If a customer asks about the name, explain that:\n"
-    "Moksha represents liberation from the cycle of rebirth (samsara) and union with the divine. It is achieved through spiritual enlightenment, freeing the soul from karma and earthly attachments to attain eternal bliss."
-)
-
-
-# Global variable to hold state accessible by tools within a single process_order call
-current_process_order_state = {'order': [], 'finished': False}
-
+# Remove the global state and related initialization
 def process_order(
     user_input_text: str,
-    current_session_history: List[Dict[str, str]],
-    current_session_order: List[Dict[str, float]]
-) -> Tuple[str, List[Dict[str, str]], List[Dict[str, float]]]:
+    current_session_history: list,
+    current_session_order: list
+) -> tuple:
     """
     Processes user input using LangChain LLM with tool calling, updates state.
     """
-    global menu, llm, current_process_order_state # Access global LLM and menu dict
-
+    global menu, llm
     if not user_input_text:
         logger.warning("Received empty user input.")
         return "Please tell me what you'd like to order.", current_session_history, current_session_order
-
-    # --- Initialize state for this specific call ---
-    # Copy Gradio state to our temporary global state accessible by tools
-    # NOTE: This global approach is simple for this example but not ideal for concurrent requests.
-    # A better approach in a real app might involve classes or context managers.
-    current_process_order_state['order'] = current_session_order[:] # Copy list
-    current_process_order_state['finished'] = False # Reset finished flag for this turn
-
     # Prepare message history for LangChain model
     messages = []
-    # Add System Prompt
     messages.append(SystemMessage(content=BARTENDERBOT_SYSINT))
-    # Add Menu (as system/context info - could also be retrieved via tool call if user asks)
-    # This explicitly calls the tool using the correct interface, providing a dummy input(the empty dictionary) that satisfies the method signature, even though the get_menu function itself doesn't use it.
-    messages.append(SystemMessage(content="\nHere is the menu:\n" + get_menu.invoke({}))) # Use invoke()
-
-    # Convert Gradio history to LangChain message types
+    messages.append(SystemMessage(content="\nHere is the menu:\n" + get_menu.invoke({})))
     history_limit = 10
     limited_history = current_session_history[-history_limit:]
     for entry in limited_history:
@@ -462,83 +373,49 @@ def process_order(
         if role == "user":
             messages.append(HumanMessage(content=content))
         elif role == "assistant":
-            messages.append(AIMessage(content=content)) # Assuming simple text responses previously
-
-    # Add the latest user input
+            messages.append(AIMessage(content=content))
     messages.append(HumanMessage(content=user_input_text))
-
     logger.info(f"Processing user input for session: {user_input_text}")
-    # logger.debug(f"Messages sent to LLM: {messages}")
-
     try:
-        # --- LLM Interaction Loop (Handles Tool Calls) ---
         while True:
-            # Invoke the LLM with current messages
             ai_response: AIMessage = llm.invoke(messages)
-            # logger.debug(f"LLM Response Object: {ai_response}")
-
-            # Append the AI's response (could be text or tool call request)
             messages.append(ai_response)
-
             if not ai_response.tool_calls:
-                # No tool calls requested, this is the final response to the user
                 agent_response_text = ai_response.content
-                break # Exit the loop
-
-            # --- Tool Call Execution ---
+                break
             logger.info(f"LLM requested tool calls: {ai_response.tool_calls}")
-            tool_messages = [] # Collect tool results
+            tool_messages = []
             for tool_call in ai_response.tool_calls:
                 tool_name = tool_call.get("name")
                 tool_args = tool_call.get("args", {})
-                tool_id = tool_call.get("id") # Important for ToolMessage
-
-                # Find the corresponding tool function
+                tool_id = tool_call.get("id")
                 selected_tool = next((t for t in tools if t.name == tool_name), None)
-
                 if selected_tool:
                     try:
-                        # Execute the tool function with its arguments
-                        # Arguments are usually dicts, unpack if needed or pass as is
-                        tool_output = selected_tool.invoke(tool_args)
+                        # Always pass the session order state as argument if required
+                        if 'order_state' in selected_tool.signature.parameters:
+                            tool_output = selected_tool.invoke({**tool_args, 'order_state': current_session_order})
+                        else:
+                            tool_output = selected_tool.invoke(tool_args)
                         logger.info(f"Executed tool '{tool_name}' with args {tool_args}. Output: {tool_output}")
                     except Exception as e:
                         logger.error(f"Error executing tool '{tool_name}': {e}")
                         tool_output = f"Error executing tool {tool_name}: {e}"
-
-                    # Append the result as a ToolMessage
                     tool_messages.append(ToolMessage(content=str(tool_output), tool_call_id=tool_id))
                 else:
                     logger.error(f"Tool '{tool_name}' requested by LLM not found.")
                     tool_messages.append(ToolMessage(content=f"Error: Tool '{tool_name}' not found.", tool_call_id=tool_id))
-
-            # Add the tool results to the message history
             messages.extend(tool_messages)
-            # Continue the loop to send results back to LLM
             logger.info("Sending tool results back to LLM...")
-
-        # --- End of LLM Interaction Loop ---
-
-        # Final response text is now set
         logger.info(f"Final agent response: {agent_response_text}")
-
-        # --- Update Gradio State ---
-        # Use the state potentially modified by tools
-        updated_order_from_tools = current_process_order_state['order']
-
-        # Update history for Gradio display
-        updated_history_for_gradio = current_session_history[:] # Start with original history for the turn
+        updated_order_from_tools = current_session_order
+        updated_history_for_gradio = current_session_history[:]
         updated_history_for_gradio.append({'role': 'user', 'content': user_input_text})
-        # We might want to include tool interactions in history for debugging, but maybe not for user display
-        # For now, just add the final assistant response
         updated_history_for_gradio.append({'role': 'assistant', 'content': agent_response_text})
-
         return agent_response_text, updated_history_for_gradio, updated_order_from_tools
-
     except Exception as e:
         logger.exception(f"Critical error in process_order: {str(e)}")
         error_message = "I'm sorry, an unexpected error occurred during processing. Please try again later."
-        # Return original state on critical error
         safe_history = current_session_history[:]
         safe_history.append({'role': 'user', 'content': user_input_text})
         safe_history.append({'role': 'assistant', 'content': error_message})
@@ -548,77 +425,8 @@ def process_order(
 # ... (keep the get_voice_audio function as it was) ...
 
 
-# %% id="YQIgKJOeIE5q"
-# Define retryable exceptions for Cartesia if known, otherwise use generic ones
-# Example: CARTESIA_RETRYABLE_EXCEPTIONS = (cartesia.errors.ServerError, cartesia.errors.RateLimitError, ConnectionError)
-# Using generic exceptions for now as specific Cartesia ones aren't known here.
-CARTESIA_RETRYABLE_EXCEPTIONS = (ConnectionError, TimeoutError) # Add more specific Cartesia errors if documented
-
-@tenacity_retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=1, max=5),
-    retry=retry_if_exception_type(CARTESIA_RETRYABLE_EXCEPTIONS),
-    before_sleep=before_sleep_log(logger, logging.WARNING) if callable(before_sleep_log) else None,
-    reraise=True
-)
-def get_voice_audio(text_to_speak: str) -> bytes | None:
-    """Calls Cartesia API synchronously to synthesize speech and returns WAV bytes."""
-    global cartesia_client, CARTESIA_VOICE_ID # Access the global client and voice ID
-
-    if not text_to_speak or not text_to_speak.strip():
-        logger.warning("get_voice_audio received empty text.")
-        return None
-    if not cartesia_client or not CARTESIA_VOICE_ID:
-         logger.error("Cartesia client or voice ID not initialized, cannot generate audio.")
-         return None
-
-    try:
-        # Replace "MOK 5-ha" with "Moksha" for pronunciation in TTS
-        text_for_tts = re.sub(r'MOK 5-ha', 'Moksha', text_to_speak, flags=re.IGNORECASE)
-        if text_for_tts != text_to_speak:
-            logger.info("Applied 'MOK 5-ha' → 'Moksha' pronunciation for TTS.")
-
-        logger.info(f"Requesting TTS from Cartesia (Voice ID: {CARTESIA_VOICE_ID}) for: '{text_for_tts[:50]}...'")
-
-        # --- Check Cartesia Documentation for the exact method call ---
-        # This is a plausible synchronous implementation pattern:
-        audio_generator = cartesia_client.tts.bytes(
-            model_id="sonic-2",
-            transcript=text_for_tts,  # Use the modified text with correct pronunciation
-            voice={"mode":"id",
-                   "id": CARTESIA_VOICE_ID,
-            },
-            language="en",
-            # Specify desired output format and sample rate
-            output_format={"container":"wav",
-                           "sample_rate": 24000,
-                           "encoding": "pcm_f32le",
-            },
-        )
-
-        # Concatenate chunks from the generator for a blocking result
-        audio_data = b"".join(chunk for chunk in audio_generator)
-        # --- End of section requiring Cartesia documentation check ---
-
-        if not audio_data:
-            logger.warning("Cartesia TTS returned empty audio data.")
-            return None
-
-        logger.info(f"Received {len(audio_data)} bytes of WAV audio data from Cartesia.")
-        return audio_data
-
-    # Catch specific Cartesia errors if they exist and are imported
-    # except cartesia.errors.CartesiaError as e:
-    #    logger.exception(f"Cartesia API error during TTS generation: {e}")
-    #    return None
-    except Exception as e:
-        # Catch any other unexpected error during TTS
-        logger.exception(f"Unexpected error generating voice audio with Cartesia: {e}")
-        return None
-
-
 # %% [markdown] id="5rsFNoUSIYjc"
-# # Gradio Interface Implementation
+# # Gradio Interface Implementation 📊
 
 # %% id="UYT5yCeG1iBT" outputId="c7387870-329d-4c76-dab3-793978de5a35"
 # Creating our own custom synthwave '84 inspired theme
@@ -688,7 +496,7 @@ synthwave_theme = gr.themes.Default(
 print("Synthwave '84 inspired Gradio theme created (forcing dark block/input backgrounds).")
 
 # %% [markdown]
-# ## Upload or Generate Bartender Avatar
+# ## Upload or Generate Bartender Avatar 📸
 
 # %%
 use_default_avatar = True
@@ -783,14 +591,14 @@ def clear_chat_state() -> Tuple[List, List, List, None]:
 
 
 # %% [markdown] id="YDudVg8TIlvu"
-# # Launch the Gradio Interface
+# # Launch the Gradio Interface 🚀
 
 # %% id="7E6cgjryIqdV"
 def launch_bartender_interface():
     theme = gr.themes.Citrus()
 
     with gr.Blocks(theme=synthwave_theme) as demo:
-        gr.Markdown("# MOK 5-ha Bartending Agent")
+        gr.Markdown("# MOK 5-ha Bartending Agent ")
         gr.Markdown("Welcome to MOK 5-ha! Ask me for a drink or check your order.")
 
         # --- Define Session State Variables ---
@@ -851,7 +659,7 @@ def launch_bartender_interface():
 
 
 # %% [markdown] id="OjZFOOFpItNX"
-# # Run the Bartending Agent 🎮
+# # Run the Bartending Agent 🚀
 
 # %% id="BBPtIMysHwnz" outputId="90990cb8-1f04-487a-8d71-4efbd62b8737"
 # Launch the interface when this cell is executed
